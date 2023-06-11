@@ -1,0 +1,73 @@
+name: Deploy🚀
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types: [published]
+
+concurrency:
+  group: ci-deployment-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_TAG: ${{ secrets.GCP_ARTIFACT_REGISTRY }}/me/bot:${{ github.ref_name }}-${{ github.sha }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+
+      - name: 'Prepare Local Workspace'
+        run: touch .env
+
+      - name: Build Docker Image
+        id: build
+        run: |
+          make image-build IMAGE_TAG=${IMAGE_TAG}
+
+      - name: Test Docker Image
+        run: make image-test IMAGE_TAG=${IMAGE_TAG}
+
+      - name: 'Authenticate to Google Cloud'
+        uses: 'google-github-actions/auth@v1'
+        with:
+          credentials_json: '${{ secrets.GOOGLE_CREDENTIALS }}'
+
+      - name: Push Docker Image
+        run: |
+          make podman-login GCP_ARTIFACT_REGISTRY=${{ secrets.GCP_ARTIFACT_REGISTRY }}
+          make image-push IMAGE_TAG=${IMAGE_TAG}
+
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: build
+    environment: ${{ github.ref_type == 'tag' && 'prod' || 'staging' }}
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+
+      - name: 'Prepare Local Workspace'
+        run: touch .env
+
+      - name: 'Authenticate to Google Cloud'
+        id: 'auth'
+        uses: 'google-github-actions/auth@v1'
+        with:
+          credentials_json: '${{ secrets.GOOGLE_CREDENTIALS }}'
+
+      - name: 'Deploy App'
+        env:
+          TF_STATE_APP_BUCKET: ${{ secrets.TF_STATE_APP_BUCKET }}
+          TF_VAR_env_name: ${{ github.ref_type == 'tag' && 'prod' || 'staging' }}
+          TF_VAR_gcp_sa_credentials: ${{ steps.auth.outputs.credentials_file_path  }}
+          TF_VAR_gcp_project_name: ${{ secrets.TF_VAR_gcp_project_name }}
+          TF_VAR_telegram_token: ${{ secrets.TF_VAR_telegram_token }}
+          TF_VAR_bot_image: ${{ env.IMAGE_TAG }}
+        run: make app-tf-init app-tf-plan app-tf-apply
